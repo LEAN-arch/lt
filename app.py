@@ -70,8 +70,11 @@ def _perform_validation(target_df, full_history, training_size):
     for i in range(val_window):
         train_end = len(full_history) - val_window + i
         train_df = full_history.iloc[train_end - training_size : train_end]
-        features_df = create_features_for_model(train_df)
-        X_train = features_df.drop(columns=full_history.columns); y_train = features_df[target_df.columns]
+        
+        processed_df = create_features_for_model(train_df)
+        X_train = processed_df.drop(columns=full_history.columns)
+        y_train = processed_df[target_df.columns]
+
         model = RandomForestRegressor(n_estimators=30, random_state=42).fit(X_train, y_train)
         last_features = create_features_for_model(train_df).iloc[-1:].drop(columns=full_history.columns)
         tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_]); pred = tree_preds.mean(axis=0)
@@ -85,42 +88,38 @@ def _perform_validation(target_df, full_history, training_size):
 @st.cache_data
 def run_expert_predictive_modeling(_df_full, training_size, forecast_horizon, _min_ranges, _max_ranges, _is_bifurcated):
     results = {}
-    history = _df_full.tail(training_size).copy()
+    history_for_forecast = _df_full.tail(training_size).copy()
     
+    def train_and_forecast(model, history, f_horizon, min_r, max_r):
+        forecasts, uncertainties = [], []
+        for _ in range(f_horizon):
+            last_features = create_features_for_model(history).iloc[-1:].drop(columns=history.columns)
+            tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_])
+            mean_pred = np.clip(tree_preds.mean(axis=0), min_r, max_r).flatten()
+            std_pred = tree_preds.std(axis=0).flatten()
+            forecasts.append(np.round(mean_pred).astype(int))
+            uncertainties.append(std_pred)
+            history = pd.concat([history, pd.DataFrame([np.round(mean_pred)], columns=history.columns, index=[history.index[-1] + pd.Timedelta(days=1)])])
+        return forecasts, uncertainties
+
     if _is_bifurcated:
         df_set, df_entity = _df_full.iloc[:, :5], _df_full.iloc[:, 5:]
         set_min = list(_min_ranges.values())[:5]; set_max = list(_max_ranges.values())[:5]
         entity_min = list(_min_ranges.values())[5:]; entity_max = list(_max_ranges.values())[5:]
         
-        # Validation
         results['set_metrics'] = _perform_validation(df_set, _df_full, training_size)
         results['entity_metrics'] = _perform_validation(df_entity, _df_full, training_size)
 
         # Final models for forecasting
-        features_set = create_features_for_model(history).drop(columns=_df_full.columns)
-        model_set = RandomForestRegressor(n_estimators=100, random_state=42).fit(features_set, history[df_set.columns])
-        features_entity = create_features_for_model(history).drop(columns=_df_full.columns)
-        model_entity = RandomForestRegressor(n_estimators=100, random_state=42).fit(features_entity, history[df_entity.columns])
+        processed_history = create_features_for_model(history_for_forecast)
+        features = processed_history.drop(columns=_df_full.columns)
+        
+        model_set = RandomForestRegressor(n_estimators=100, random_state=42).fit(features, processed_history[df_set.columns])
+        model_entity = RandomForestRegressor(n_estimators=100, random_state=42).fit(features, processed_history[df_entity.columns])
 
-        # Rigorous autoregressive forecast loop
-        set_forecasts, entity_forecasts = [], []
-        set_uncertainties, entity_uncertainties = [], []
-        forecast_history = history.copy()
-        for _ in range(forecast_horizon):
-            last_features = create_features_for_model(forecast_history).iloc[-1:].drop(columns=_df_full.columns)
-            
-            tree_preds_set = np.array([tree.predict(last_features) for tree in model_set.estimators_])
-            pred_set = np.clip(tree_preds_set.mean(axis=0), set_min, set_max).flatten()
-            set_forecasts.append(np.round(pred_set).astype(int))
-            set_uncertainties.append(tree_preds_set.std(axis=0).flatten())
-            
-            tree_preds_entity = np.array([tree.predict(last_features) for tree in model_entity.estimators_])
-            pred_entity = np.clip(tree_preds_entity.mean(axis=0), entity_min, entity_max).flatten()
-            entity_forecasts.append(np.round(pred_entity).astype(int))
-            entity_uncertainties.append(tree_preds_entity.std(axis=0).flatten())
-            
-            next_full_pred = np.concatenate([np.round(pred_set), np.round(pred_entity)])
-            forecast_history = pd.concat([forecast_history, pd.DataFrame([next_full_pred], columns=_df_full.columns, index=[forecast_history.index[-1] + pd.Timedelta(days=1)])])
+        # Forecasting
+        set_forecasts, set_uncertainties = train_and_forecast(model_set, history_for_forecast, forecast_horizon, set_min, set_max)
+        entity_forecasts, entity_uncertainties = train_and_forecast(model_entity, history_for_forecast, forecast_horizon, entity_min, entity_max)
 
         index = pd.date_range(start=_df_full.index[-1] + pd.Timedelta(days=1), periods=forecast_horizon)
         results['set_forecast_df'] = pd.DataFrame(set_forecasts, columns=df_set.columns, index=index)
@@ -131,18 +130,12 @@ def run_expert_predictive_modeling(_df_full, training_size, forecast_horizon, _m
     else: # Unified Mode
         all_min = list(_min_ranges.values()); all_max = list(_max_ranges.values())
         results['unified_metrics'] = _perform_validation(_df_full, _df_full, training_size)
-        features = create_features_for_model(history).drop(columns=_df_full.columns)
-        model = RandomForestRegressor(n_estimators=100, random_state=42).fit(features, history)
         
-        forecasts, uncertainties = [], []
-        forecast_history = history.copy()
-        for _ in range(forecast_horizon):
-            last_features = create_features_for_model(forecast_history).iloc[-1:].drop(columns=_df_full.columns)
-            tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_])
-            pred = np.clip(tree_preds.mean(axis=0), all_min, all_max).flatten()
-            forecasts.append(np.round(pred).astype(int))
-            uncertainties.append(tree_preds.std(axis=0).flatten())
-            forecast_history = pd.concat([forecast_history, pd.DataFrame([np.round(pred)], columns=_df_full.columns, index=[forecast_history.index[-1] + pd.Timedelta(days=1)])])
+        processed_history = create_features_for_model(history_for_forecast)
+        features = processed_history.drop(columns=_df_full.columns)
+        model = RandomForestRegressor(n_estimators=100, random_state=42).fit(features, processed_history)
+        
+        forecasts, uncertainties = train_and_forecast(model, history_for_forecast, forecast_horizon, all_min, all_max)
             
         index = pd.date_range(start=_df_full.index[-1] + pd.Timedelta(days=1), periods=forecast_horizon)
         results['unified_forecast_df'] = pd.DataFrame(forecasts, columns=_df_full.columns, index=index)
@@ -304,3 +297,7 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
                     fig_cond = run_entity_distribution_analysis(filtered_entity_df, min_ranges['d6'], max_ranges['d6'], title_suffix=f"(Set in Regime '{selected_cluster}')")
                     st.plotly_chart(fig_cond, use_container_width=True)
             else: st.plotly_chart(st.session_state.clustering_fig, use_container_width=True)
+
+# Initial state message
+if not data_loaded:
+    st.info("👋 Welcome! Please upload a CSV file with numerical time-series data to begin.")
