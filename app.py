@@ -246,7 +246,6 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             for i in range(st.session_state.num_columns): cols[i].metric(f"{next_unified.index[i]}", int(next_unified.values[i]))
     
     with st.expander("MODULE 1 — Core Analytical Engine: Time Evolution", expanded=False):
-        # ... Full content restored ...
         if st.session_state.is_bifurcated:
             c1, c2 = st.columns(2)
             with c1:
@@ -289,7 +288,6 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             display_forecast_plot(f"Forecast for {st.session_state.num_columns}-D Unified System", st.session_state.data_full.tail(training_size), pred_res['unified_forecast_df'], pred_res['unified_uncertainty_df'])
 
     with st.expander("MODULE 3 — System Dynamics & Regime Discovery", expanded=True):
-        # ... Full content restored ...
         clustering_df = st.session_state.get('clustering_df')
         if clustering_df is not None:
             if st.session_state.is_bifurcated:
@@ -300,8 +298,14 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
                     available_clusters = sorted(clustering_df['Cluster'].unique())
                     selected_cluster = st.selectbox("Analyze Entity behavior when the Set is in Regime:", options=available_clusters)
                 with c2:
-                    indices = clustering_df[clustering_df['Cluster'] == selected_cluster].index
+                    # --- THE FIX IS HERE ---
+                    # The mask must be created from the clustering_df and applied to the same df to get the index
+                    mask = clustering_df['Cluster'] == selected_cluster
+                    indices = clustering_df[mask].index
+                    
+                    # Now use the correct indices to filter the full dataset
                     filtered_entity_df = st.session_state.data_full.loc[indices].iloc[:, 5:]
+                    
                     fig_cond = run_entity_distribution_analysis(filtered_entity_df, min_ranges['d6'], max_ranges['d6'], title_suffix=f"(Set in Regime '{selected_cluster}')")
                     st.plotly_chart(fig_cond, use_container_width=True)
             else: st.plotly_chart(st.session_state.clustering_fig, use_container_width=True)
