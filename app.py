@@ -251,7 +251,7 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             res_uni = run_time_series_analysis(st.session_state.data_full, sel_col)
             st.plotly_chart(res_uni['fft'], use_container_width=True)
         
-        with st.expander("🔬 Methodology & Significance", expanded=True):
+        with st.expander("🔬 Methodology, Interpretation & Significance", expanded=True):
             st.markdown("""
             #### Methodology: Signal Decomposition
             This module decomposes each time-series into its fundamental components to diagnose its underlying nature.
@@ -259,12 +259,13 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             - **Wavelet Decomposition:** Unlike Fourier, this method provides both time and frequency localization. It breaks the signal into an *approximation* coefficient (the underlying, slow-moving trend) and multiple levels of *detail* coefficients (high-frequency bursts, noise, or transient shocks).
             - **Recurrence Plot:** A technique from chaos theory that visualizes when the system revisits a previous state in its phase space. It is a powerful visual tool for identifying determinism and non-stationarity.
 
-            #### Interpretation & Actionable Insights
-            - **Reading the Plots:**
-                - In the **Fourier Plot**, sharp, high-amplitude peaks indicate strong cyclical behavior at a specific frequency. A flat, noisy spectrum suggests randomness.
-                - In the **Wavelet Plot**, the top level shows the core trend, while lower levels show increasingly fine-grained volatility. A large spike in a detail coefficient indicates a shock or anomaly at that specific point in time.
-                - In the **Recurrence Plot**, long, unbroken diagonal lines indicate highly predictable, deterministic periods. Fading or broken diagonals suggest the system's rules are changing over time (non-stationarity). Random speckles indicate chaotic or purely stochastic behavior.
-            - **Actionable Significance:** By comparing the plots for different columns (or for the Set vs. the Entity), you can diagnose the system's predictability. A system with strong cyclical and deterministic patterns (strong peaks, long diagonals) is inherently more forecastable than one that is noisy and chaotic.
+            #### Interpretation of the Plots
+            - **Fourier Plot:** Sharp, high-amplitude peaks indicate strong cyclical behavior at a specific frequency (e.g., a bias for a number to appear every 10 events). A flat, noisy spectrum suggests pure randomness with no discernible cycles.
+            - **Wavelet Plot:** The top level (Lvl 0) shows the core, smoothed trend of the data. Lower levels show increasingly fine-grained volatility. A large spike in a detail coefficient (e.g., Lvl 4) indicates a significant shock or anomaly occurred at that specific point in time, which would be invisible in a simple time-series plot.
+            - **Recurrence Plot:** This is a map of the system's memory. Long, unbroken diagonal lines indicate highly predictable, deterministic periods where the system's behavior is repeating. Fading or broken diagonals suggest the system's rules are changing over time (non-stationarity). Random speckles indicate chaotic or purely stochastic behavior, which is very difficult to predict.
+
+            #### Actionable Significance
+            By comparing the plots for different columns (or for the Set vs. the Entity), you can diagnose the system's predictability. A system with strong cyclical and deterministic patterns (strong peaks, long diagonals) is inherently more forecastable. A chaotic or random system requires more sophisticated, probabilistic forecasting methods, and one should have lower confidence in any single point prediction.
             """)
 
     with st.expander("MODULE 2 — Predictive Modeling & Stability", expanded=True):
@@ -281,9 +282,9 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
         if st.session_state.is_bifurcated:
             st.subheader("Bifurcated System Performance")
             m1, m2, m3 = st.columns(3)
-            m1.metric("Set (d1-d5) OOS Loss", f"{pred_res['set_metrics']['oos_loss']:.3f}")
-            m2.metric("Entity (d6) OOS Loss", f"{pred_res['entity_metrics']['oos_loss']:.3f}")
-            m3.metric("Entity Top-3 Accuracy", f"{pred_res['entity_metrics']['top_n_accuracy']:.2%}" if pred_res['entity_metrics']['top_n_accuracy'] is not None else "N/A")
+            m1.metric("Set (d1-d5) OOS Loss", f"{pred_res['set_metrics']['oos_loss']:.3f}", help="Average prediction error on unseen data.")
+            m2.metric("Entity (d6) OOS Loss", f"{pred_res['entity_metrics']['oos_loss']:.3f}", help="Average prediction error on unseen data.")
+            m3.metric("Entity Top-3 Accuracy", f"{pred_res['entity_metrics']['top_n_accuracy']:.2%}" if pred_res['entity_metrics']['top_n_accuracy'] is not None else "N/A", help="How often the true value was in the model's top 3 likely outcomes.")
             display_forecast_plot("Forecast for 5-Entity Set (with 95% Confidence)", st.session_state.data_full.iloc[:, :5].tail(training_size), pred_res['set_forecast_df'], pred_res['set_uncertainty_df'])
         else:
             st.subheader("Unified System Performance")
@@ -292,17 +293,18 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             m2.metric("Forecast Stability", f"{pred_res['unified_metrics']['forecast_stability']:.3f}")
             display_forecast_plot(f"Forecast for {st.session_state.num_columns}-D Unified System", st.session_state.data_full.tail(training_size), pred_res['unified_forecast_df'], pred_res['unified_uncertainty_df'])
         
-        with st.expander("🔬 Methodology & Significance", expanded=True):
+        with st.expander("🔬 Methodology, Interpretation & Significance", expanded=True):
             st.markdown("""
             #### Methodology: Rolling Forecast Validation & Probabilistic Prediction
-            This module replaces simple in-sample training with a rigorous **Rolling Forecast Validation**. The model is repeatedly trained on a sliding window of historical data and tested on the very next, unseen data point. This process is repeated across a validation set to generate robust, out-of-sample performance metrics.
+            This module replaces simple in-sample training with a rigorous **Rolling Forecast Validation**. The model is repeatedly trained on a sliding window of historical data and tested on the very next, unseen data point. This process is repeated across a validation set to generate robust, out-of-sample performance metrics. This is the gold standard for time-series model evaluation.
 
-            - **Out-of-Sample Loss (MSE):** This is the most honest measure of a model's predictive power, as it's calculated exclusively on data the model has never seen during training. A lower value indicates a more accurate model.
-            - **Top-N Accuracy:** For single-entity predictions, this measures how frequently the true future value falls within the model's top 3 most likely outcomes (derived from the distribution of tree predictions). It's a practical measure of utility for discrete choices.
-            - **Probabilistic Forecast:** The forecast is not a single number but a distribution derived from the individual decision trees within the Random Forest. The shaded area represents the 95% confidence interval, a direct measure of model uncertainty.
+            #### Interpretation of the Metrics
+            - **Out-of-Sample (OOS) Loss (MSE):** This is the most honest measure of a model's predictive power. It's the average squared error on data the model has never seen during training. A lower value indicates a more accurate model. This metric should be used to compare different model configurations (e.g., different Training History Sizes).
+            - **Top-N Accuracy:** For single-entity predictions, this measures how frequently the true future value falls within the model's top 3 most likely outcomes (derived from the distribution of tree predictions). It's a practical measure of utility for discrete choices where being "close" is valuable.
+            - **Forecast Plot & Confidence Interval:** The plot shows the historical data (solid line) and the model's forecast (dotted line). The shaded area represents the 95% confidence interval, derived from the standard deviation of predictions across all trees in the Random Forest. It is a direct measure of the model's uncertainty.
 
-            #### Actionable Significance: Quantifying True Predictive Power
-            This rigorous approach prevents a common pitfall: building a model that is excellent at explaining the past (in-sample fit) but poor at predicting the future (out-of-sample performance). The metrics presented here provide a realistic, mathematically sound assessment of the model's true capability and reliability. **Actionable Item:** If the OOS Loss is high or the confidence bands are very wide, the system is inherently difficult to predict with this model and feature set; more complex models or different features may be needed.
+            #### Actionable Significance
+            This rigorous approach prevents the common pitfall of *overfitting*—building a model that is excellent at explaining the past but poor at predicting the future. The metrics presented here provide a realistic assessment of the model's reliability. **Actionable Item:** If the OOS Loss is high or the confidence bands are very wide, the system is inherently difficult to predict with this model and feature set. This implies that either the system is highly chaotic (as diagnosed in Module 1) or that more complex models or different features (e.g., external variables) may be needed.
             """)
 
     with st.expander("MODULE 3 — System Dynamics & Regime Discovery", expanded=True):
@@ -322,17 +324,19 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
                     st.plotly_chart(fig_cond, use_container_width=True)
             else: st.plotly_chart(st.session_state.clustering_fig, use_container_width=True)
             
-            with st.expander("🔬 Methodology & Significance", expanded=True):
+            with st.expander("🔬 Methodology, Interpretation & Significance", expanded=True):
                 st.markdown(f"""
                 #### Methodology: State-Space Mapping & Conditional Probability
                 This module visualizes the system's *state space*—a map of its preferred behaviors.
-                - **Regime Identification:** We use **UMAP**, a non-linear manifold learning technique, to reduce the high-dimensional space of the primary system ({'the 5-entity set' if st.session_state.is_bifurcated else f'all {st.session_state.num_columns} entities'}) into a 2D map that preserves topological structure. **HDBSCAN** then identifies dense clusters on this map, which represent distinct behavioral 'regimes' or 'families' of events.
+                - **Regime Identification:** We use **UMAP**, a non-linear manifold learning technique, to reduce the high-dimensional space of the primary system ({'the 5-entity set' if st.session_state.is_bifurcated else f'all {st.session_state.num_columns} entities'}) into a 2D map that preserves topological structure. **HDBSCAN** then identifies dense clusters on this map, which represent distinct behavioral 'regimes' or 'families' of events. The `-1` cluster represents anomalies that do not fit any regime.
                 - **Conditional Analysis (Bifurcated Mode Only):** When the system is bifurcated, this tool becomes an interactive workbench. By selecting a regime for the Set, you are filtering the entire history to moments when the Set was in that state. We then re-calculate the probability distribution of the 6th Entity using only this subset. This reveals the conditional probability `P(Entity | Set is in Regime X)`.
 
-                #### Actionable Significance: Uncovering Hidden System Structure
-                This analysis answers deep questions about the system's nature.
-                - **For any system,** the cluster plot reveals if the system has preferred states (distinct clusters) or if its behavior is uniform and random (one large cluster or mostly noise points).
-                - **In Bifurcated Mode,** this is a powerful test for dependency. **Actionable Item:** If the Entity's distribution plot on the right changes shape or shifts significantly when you select different Set regimes on the left, you have discovered strong evidence that the two sub-systems are linked. This provides a predictive rule: "When the Set behaves like *this*, the Entity is more likely to behave like *that*." If the distribution remains the same, the systems are likely independent.
+                #### Interpretation of the Plots
+                - **Cluster Plot:** Each colored group represents a recurring pattern or type of event in the data. A system with many small, tight clusters is more structured than a system with one large, diffuse cloud. The size of the `-1` (noise) cluster indicates the proportion of anomalous or unpredictable events.
+                - **Conditional Distribution Plot:** This shows the likelihood of the 6th Entity taking on a certain value, *given that the Set is in a specific regime*.
+
+                #### Actionable Significance
+                This analysis uncovers hidden system structure. **Actionable Item (Bifurcated Mode):** If the Entity's distribution plot on the right changes shape or its peak shifts significantly when you select different Set regimes on the left, you have discovered a strong statistical dependency. This provides a predictive rule: "When the Set behaves like *Regime X*, the Entity is more likely to behave like *Y*." If the distribution remains the same regardless of the selected cluster, the two systems are likely independent. This is a powerful, data-driven method for generating hypotheses about the system's internal rules.
                 """)
 
 # Initial state message
