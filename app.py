@@ -7,9 +7,10 @@ from plotly.subplots import make_subplots
 import io
 
 # --- Core Scientific & ML Libraries ---
-# Make sure to install these: pip install scikit-learn pywavelets pyts umap-learn hdbscan
+# Make sure to install these: pip install scikit-learn pywavelets umap-learn hdbscan scipy
 import pywt
-from pyts.image import RecurrencePlot
+# --- FIX #1: Removed pyts import ---
+from scipy.spatial.distance import pdist, squareform # Using SciPy for Recurrence Plot
 import umap
 import hdbscan
 from sklearn.preprocessing import StandardScaler
@@ -41,16 +42,20 @@ st.markdown("""
 # ==============================================================================
 @st.cache_data
 def run_time_series_analysis(_df, column):
-    series = _df[column].values
-    fft_vals, fft_freq = np.fft.fft(series), np.fft.fftfreq(len(series))
+    series = _df[column].values.reshape(-1, 1) # Ensure 2D for distance matrix
+    fft_vals, fft_freq = np.fft.fft(series.flatten()), np.fft.fftfreq(len(series))
     fig_fft = px.line(x=fft_freq[1:len(fft_freq)//2], y=np.abs(fft_vals)[1:len(fft_vals)//2], title=f"Fourier: {column}", labels={'x': 'Freq', 'y': 'Amp'})
-    coeffs = pywt.wavedec(series, 'db4', level=4)
+    coeffs = pywt.wavedec(series.flatten(), 'db4', level=4)
     fig_wavelet = make_subplots(rows=len(coeffs), cols=1, subplot_titles=[f'Lvl {i}' for i in range(len(coeffs))])
     for i, c in enumerate(coeffs): fig_wavelet.add_trace(go.Scatter(y=c, mode='lines'), row=i+1, col=1)
     fig_wavelet.update_layout(height=400, showlegend=False, title=f"Wavelet: {column}")
-    rp = RecurrencePlot(threshold='point', percentage=20)
-    X_rp = rp.fit_transform(series.reshape(1, -1))
-    fig_rp = px.imshow(X_rp[0], title=f'Recurrence: {column}')
+    
+    # --- FIX #1: Custom Recurrence Plot implementation using SciPy ---
+    distance_matrix = squareform(pdist(series, metric='euclidean'))
+    threshold = np.percentile(distance_matrix, 20)
+    recurrence_matrix = (distance_matrix < threshold).astype(int)
+    fig_rp = px.imshow(recurrence_matrix, title=f'Recurrence: {column}')
+    
     return {"fft": fig_fft, "wavelet": fig_wavelet, "recurrence": fig_rp}
 
 # ==============================================================================
@@ -246,6 +251,7 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             for i in range(st.session_state.num_columns): cols[i].metric(f"{next_unified.index[i]}", int(next_unified.values[i]))
     
     with st.expander("MODULE 1 — Core Analytical Engine: Time Evolution", expanded=False):
+        # ... Full content restored ...
         if st.session_state.is_bifurcated:
             c1, c2 = st.columns(2)
             with c1:
@@ -288,6 +294,7 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             display_forecast_plot(f"Forecast for {st.session_state.num_columns}-D Unified System", st.session_state.data_full.tail(training_size), pred_res['unified_forecast_df'], pred_res['unified_uncertainty_df'])
 
     with st.expander("MODULE 3 — System Dynamics & Regime Discovery", expanded=True):
+        # ... Full content restored ...
         clustering_df = st.session_state.get('clustering_df')
         if clustering_df is not None:
             if st.session_state.is_bifurcated:
@@ -298,13 +305,11 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
                     available_clusters = sorted(clustering_df['Cluster'].unique())
                     selected_cluster = st.selectbox("Analyze Entity behavior when the Set is in Regime:", options=available_clusters)
                 with c2:
-                    # --- THE FIX IS HERE ---
-                    # The mask must be created from the clustering_df and applied to the same df to get the index
+                    # --- FIX #2: Robust filtering using a reindexed boolean mask ---
                     mask = clustering_df['Cluster'] == selected_cluster
-                    indices = clustering_df[mask].index
-                    
-                    # Now use the correct indices to filter the full dataset
-                    filtered_entity_df = st.session_state.data_full.loc[indices].iloc[:, 5:]
+                    # Reindex the mask to match the full dataframe's index
+                    full_mask = mask.reindex(st.session_state.data_full.index, fill_value=False)
+                    filtered_entity_df = st.session_state.data_full[full_mask].iloc[:, 5:]
                     
                     fig_cond = run_entity_distribution_analysis(filtered_entity_df, min_ranges['d6'], max_ranges['d6'], title_suffix=f"(Set in Regime '{selected_cluster}')")
                     st.plotly_chart(fig_cond, use_container_width=True)
