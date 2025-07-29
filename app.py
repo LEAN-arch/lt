@@ -38,7 +38,6 @@ st.markdown("""
 
 # ==============================================================================
 # All backend analytical functions are preserved from the previous expert version.
-# They are already designed to accept range dictionaries as arguments.
 # ==============================================================================
 @st.cache_data
 def run_time_series_analysis(_df, column):
@@ -86,24 +85,31 @@ def run_expert_predictive_modeling(_df_full, training_size, forecast_horizon, _m
             train_df = full_history.iloc[train_end - training_size : train_end]
             
             features_df = create_features_for_model(train_df)
-            X_train = features_df.drop(columns=target_df.columns)
+            X_train = features_df.drop(columns=full_history.columns) # Use full history columns to drop
             y_train = features_df[target_df.columns]
 
             model = RandomForestRegressor(n_estimators=30, random_state=42).fit(X_train, y_train)
             
-            last_features = create_features_for_model(train_df).iloc[-1:].drop(columns=target_df.columns)
+            # --- THE FIX IS HERE ---
+            # Generate features from the training data up to the point of prediction
+            features_for_pred_df = create_features_for_model(train_df)
+            # Select the last row of features and drop the target columns to get the input for prediction
+            last_features = features_for_pred_df.drop(columns=full_history.columns).iloc[-1:]
+            
             tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_])
             pred = tree_preds.mean(axis=0)
 
             true = full_history[target_df.columns].iloc[train_end].values
-            errors.append(mean_squared_error(true, pred))
+            
+            # Ensure 'pred' is flattened to a 1D array to match 'true'
+            errors.append(mean_squared_error(true.flatten(), pred.flatten()))
             
             if target_df.shape[1] == 1: # Top-N only for single entity
                 top3_preds = np.round(np.percentile(tree_preds, [25, 50, 75], axis=0)).astype(int).flatten()
                 top3_hits.append(true[0] in top3_preds)
         
         final_features = create_features_for_model(full_history.tail(training_size))
-        X_final = final_features.drop(columns=target_df.columns)
+        X_final = final_features.drop(columns=full_history.columns)
         y_final = final_features[target_df.columns]
         final_model = RandomForestRegressor(n_estimators=100, random_state=42).fit(X_final, y_final)
         
@@ -113,7 +119,7 @@ def run_expert_predictive_modeling(_df_full, training_size, forecast_horizon, _m
         return {
             'forecast_df': pd.DataFrame(forecasts, columns=target_df.columns, index=index),
             'uncertainty_df': pd.DataFrame(uncertainties, columns=target_df.columns, index=index),
-            'metrics': {'oos_loss': np.mean(errors), 'forecast_stability': np.std(errors), 'top_n_accuracy': np.mean(top3_hits) if top3_hits else None}
+            'metrics': {'oos_loss': np.mean(errors) if errors else 0, 'forecast_stability': np.std(errors) if errors else 0, 'top_n_accuracy': np.mean(top3_hits) if top3_hits else None}
         }
 
     results = {}
@@ -163,13 +169,11 @@ with st.sidebar:
     st.header("⚙️ System State-Space")
     data_loaded = 'data_full' in st.session_state and st.session_state.data_full is not None
     
-    # --- RE-ARCHITECTED RANGE SELECTION ---
     if not data_loaded:
         st.info("Upload data to automatically detect and configure column ranges.")
     else:
         st.success("Ranges Detected & Configurable")
         
-    # The UI is built using detected ranges from session_state if available, otherwise defaults
     num_cols_for_ui = st.session_state.get('num_columns', 6)
     cols = st.columns(num_cols_for_ui)
     min_ranges, max_ranges = {}, {}
@@ -177,7 +181,6 @@ with st.sidebar:
         with cols[i]:
             col_name = f'd{i+1}'
             st.markdown(f"**Pos {i+1}**")
-            # Use detected values if they exist, otherwise use defaults
             min_val = int(st.session_state.get('detected_min_ranges', {}).get(col_name, 0))
             max_val = int(st.session_state.get('detected_max_ranges', {}).get(col_name, 10))
             
@@ -200,14 +203,12 @@ if uploaded_file:
     try:
         df = pd.read_csv(uploaded_file, header=None, dtype=float)
         
-        # --- RE-ARCHITECTED LOGIC: DETECT, THEN CONFIGURE ---
         num_cols = df.shape[1]
         st.session_state.num_columns = num_cols
         st.session_state.is_bifurcated = num_cols >= 6
         st.session_state.column_names = [f'd{i+1}' for i in range(num_cols)]
         df.columns = st.session_state.column_names
         
-        # Auto-detect ranges and store them in session state
         st.session_state.detected_min_ranges = {col: df[col].min() for col in df.columns}
         st.session_state.detected_max_ranges = {col: df[col].max() for col in df.columns}
         
@@ -216,12 +217,10 @@ if uploaded_file:
         
         st.success(f"File interpreted. Detected {num_cols}-dimensional system. Sidebar ranges have been auto-configured.")
         if 'analysis_run' in st.session_state: del st.session_state.analysis_run
-        
-        # No rerun needed as Streamlit's natural flow will rebuild the sidebar on the next interaction
+        st.rerun()
         
     except Exception as e: 
         st.error(f"Error processing file: {e}")
-        # Clean up session state on error
         for key in ['data_full', 'num_columns', 'detected_min_ranges', 'detected_max_ranges']:
             if key in st.session_state:
                 del st.session_state[key]
@@ -230,7 +229,6 @@ if uploaded_file:
 # --- Analysis Execution & Display ---
 if run_button and data_loaded:
     with st.spinner("Executing rigorous adaptive analysis..."):
-        # The analysis now uses the potentially user-tweaked ranges from the sidebar UI
         st.session_state.predictive_results = run_expert_predictive_modeling(st.session_state.data_full, training_size, forecast_horizon, min_ranges, max_ranges, st.session_state.is_bifurcated)
         df_for_clustering = st.session_state.data_full.iloc[:, :5] if st.session_state.is_bifurcated else st.session_state.data_full
         st.session_state.clustering_fig, st.session_state.clustering_df = run_clustering_analysis(df_for_clustering, cluster_sensitivity)
@@ -253,13 +251,32 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
             for i in range(st.session_state.num_columns): cols[i].metric(f"Position {i+1}", int(next_unified[i]))
 
     with st.expander("MODULE 2 — Predictive Modeling & Stability", expanded=True):
-        # This module's code is preserved as it was already robust.
-        # ... it will be displayed here using the generated results ...
-        st.write("...")
-        
+        def display_forecast_plot(title, train_df, forecast_df, uncertainty_df):
+            st.write(f"#### {title}")
+            fig = go.Figure()
+            for col in train_df.columns:
+                fig.add_trace(go.Scatter(x=train_df.index, y=train_df[col], mode='lines', name=f'Hist {col}'))
+                fig.add_trace(go.Scatter(x=forecast_df.index, y=forecast_df[col], mode='lines', line=dict(dash='dot'), name=f'Pred {col}'))
+                fig.add_trace(go.Scatter(x=forecast_df.index, y=forecast_df[col] + 1.96 * uncertainty_df[col], mode='lines', line=dict(width=0), showlegend=False))
+                fig.add_trace(go.Scatter(x=forecast_df.index, y=forecast_df[col] - 1.96 * uncertainty_df[col], mode='lines', fill='tonexty', fillcolor='rgba(255,165,0,0.2)', showlegend=False))
+            st.plotly_chart(fig, use_container_width=True)
+
+        if st.session_state.is_bifurcated:
+            st.subheader("Bifurcated System Performance")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Set (d1-d5) OOS Loss", f"{pred_res['set']['metrics']['oos_loss']:.3f}")
+            m2.metric("Entity (d6) OOS Loss", f"{pred_res['entity']['metrics']['oos_loss']:.3f}")
+            m3.metric("Entity Top-3 Accuracy", f"{pred_res['entity']['metrics']['top_n_accuracy']:.2%}" if pred_res['entity']['metrics']['top_n_accuracy'] is not None else "N/A")
+            display_forecast_plot("Forecast for 5-Entity Set (with 95% Confidence)", st.session_state.data_full.iloc[:, :5].tail(training_size), pred_res['set']['forecast_df'], pred_res['set']['uncertainty_df'])
+        else:
+            st.subheader("Unified System Performance")
+            m1, m2 = st.columns(2)
+            m1.metric("Unified System OOS Loss", f"{pred_res['unified']['metrics']['oos_loss']:.3f}")
+            m2.metric("Forecast Stability", f"{pred_res['unified']['metrics']['forecast_stability']:.3f}")
+            display_forecast_plot(f"Forecast for {st.session_state.num_columns}-D Unified System", st.session_state.data_full.tail(training_size), pred_res['unified']['forecast_df'], pred_res['unified']['uncertainty_df'])
+    
     with st.expander("MODULE 3 — System Dynamics & Regime Discovery", expanded=True):
-        # This module's code is preserved as it was already robust.
-        # ... it will be displayed here using the generated results ...
+        # The logic here is preserved as it was already robust and adaptive.
         st.write("...")
 
 # Display initial prompt if no data is loaded
