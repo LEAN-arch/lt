@@ -62,61 +62,92 @@ def create_features_for_model(df, lags=5):
         df_feat[[f'{col}_lag_{lag}' for col in df.columns]] = df.shift(lag)
     return df_feat.dropna()
 
-def train_and_forecast(model, history, forecast_horizon, min_ranges, max_ranges):
-    forecasts, uncertainties = [], []
-    for _ in range(forecast_horizon):
-        last_features = create_features_for_model(history).iloc[-1:].drop(columns=history.columns)
-        tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_])
-        mean_pred = np.clip(tree_preds.mean(axis=0), min_ranges, max_ranges).flatten()
-        std_pred = tree_preds.std(axis=0).flatten()
-        forecasts.append(np.round(mean_pred).astype(int))
-        uncertainties.append(std_pred)
-        history = pd.concat([history, pd.DataFrame([np.round(mean_pred)], columns=history.columns, index=[history.index[-1] + pd.Timedelta(days=1)])])
-    return forecasts, uncertainties
+def _perform_validation(target_df, full_history, training_size):
+    errors, top3_hits = [], []
+    val_window = min(50, len(full_history) - training_size - 1)
+    if val_window <= 0: return {'oos_loss': -1, 'forecast_stability': -1, 'top_n_accuracy': -1}
+
+    for i in range(val_window):
+        train_end = len(full_history) - val_window + i
+        train_df = full_history.iloc[train_end - training_size : train_end]
+        features_df = create_features_for_model(train_df)
+        X_train = features_df.drop(columns=full_history.columns); y_train = features_df[target_df.columns]
+        model = RandomForestRegressor(n_estimators=30, random_state=42).fit(X_train, y_train)
+        last_features = create_features_for_model(train_df).iloc[-1:].drop(columns=full_history.columns)
+        tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_]); pred = tree_preds.mean(axis=0)
+        true = full_history[target_df.columns].iloc[train_end].values
+        errors.append(mean_squared_error(true.flatten(), pred.flatten()))
+        if target_df.shape[1] == 1:
+            top3_preds = np.round(np.percentile(tree_preds, [25, 50, 75], axis=0)).astype(int).flatten()
+            top3_hits.append(true[0] in top3_preds)
+    return {'oos_loss': np.mean(errors), 'forecast_stability': np.std(errors), 'top_n_accuracy': np.mean(top3_hits) if top3_hits else None}
 
 @st.cache_data
 def run_expert_predictive_modeling(_df_full, training_size, forecast_horizon, _min_ranges, _max_ranges, _is_bifurcated):
-    
-    def perform_validation_and_forecast(target_df, full_history, min_r, max_r):
-        errors, top3_hits = [], []
-        val_window = min(50, len(full_history) - training_size - 1)
-        if val_window <= 0: return {'forecast_df': pd.DataFrame(), 'uncertainty_df': pd.DataFrame(), 'metrics': {'oos_loss': -1, 'forecast_stability': -1, 'top_n_accuracy': -1}}
-
-        for i in range(val_window):
-            train_end = len(full_history) - val_window + i
-            train_df = full_history.iloc[train_end - training_size : train_end]
-            features_df = create_features_for_model(train_df)
-            X_train = features_df.drop(columns=full_history.columns); y_train = features_df[target_df.columns]
-            model = RandomForestRegressor(n_estimators=30, random_state=42).fit(X_train, y_train)
-            last_features = create_features_for_model(train_df).iloc[-1:].drop(columns=full_history.columns)
-            tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_]); pred = tree_preds.mean(axis=0)
-            true = full_history[target_df.columns].iloc[train_end].values
-            errors.append(mean_squared_error(true.flatten(), pred.flatten()))
-            if target_df.shape[1] == 1:
-                top3_preds = np.round(np.percentile(tree_preds, [25, 50, 75], axis=0)).astype(int).flatten()
-                top3_hits.append(true[0] in top3_preds)
-        
-        final_features = create_features_for_model(full_history.tail(training_size))
-        X_final = final_features.drop(columns=full_history.columns); y_final = final_features[target_df.columns]
-        final_model = RandomForestRegressor(n_estimators=100, random_state=42).fit(X_final, y_final)
-        forecasts, uncertainties = train_and_forecast(final_model, full_history.tail(training_size), forecast_horizon, min_r, max_r)
-        index = pd.date_range(start=full_history.index[-1] + pd.Timedelta(days=1), periods=forecast_horizon)
-        return {
-            'forecast_df': pd.DataFrame(forecasts, columns=target_df.columns, index=index),
-            'uncertainty_df': pd.DataFrame(uncertainties, columns=target_df.columns, index=index),
-            'metrics': {'oos_loss': np.mean(errors), 'forecast_stability': np.std(errors), 'top_n_accuracy': np.mean(top3_hits) if top3_hits else None}
-        }
-
     results = {}
+    history = _df_full.tail(training_size).copy()
+    
     if _is_bifurcated:
         df_set, df_entity = _df_full.iloc[:, :5], _df_full.iloc[:, 5:]
         set_min = list(_min_ranges.values())[:5]; set_max = list(_max_ranges.values())[:5]
         entity_min = list(_min_ranges.values())[5:]; entity_max = list(_max_ranges.values())[5:]
-        results['set'] = perform_validation_and_forecast(df_set, _df_full, set_min, set_max)
-        results['entity'] = perform_validation_and_forecast(df_entity, _df_full, entity_min, entity_max)
-    else:
+        
+        # Validation
+        results['set_metrics'] = _perform_validation(df_set, _df_full, training_size)
+        results['entity_metrics'] = _perform_validation(df_entity, _df_full, training_size)
+
+        # Final models for forecasting
+        features_set = create_features_for_model(history).drop(columns=_df_full.columns)
+        model_set = RandomForestRegressor(n_estimators=100, random_state=42).fit(features_set, history[df_set.columns])
+        features_entity = create_features_for_model(history).drop(columns=_df_full.columns)
+        model_entity = RandomForestRegressor(n_estimators=100, random_state=42).fit(features_entity, history[df_entity.columns])
+
+        # Rigorous autoregressive forecast loop
+        set_forecasts, entity_forecasts = [], []
+        set_uncertainties, entity_uncertainties = [], []
+        forecast_history = history.copy()
+        for _ in range(forecast_horizon):
+            last_features = create_features_for_model(forecast_history).iloc[-1:].drop(columns=_df_full.columns)
+            
+            tree_preds_set = np.array([tree.predict(last_features) for tree in model_set.estimators_])
+            pred_set = np.clip(tree_preds_set.mean(axis=0), set_min, set_max).flatten()
+            set_forecasts.append(np.round(pred_set).astype(int))
+            set_uncertainties.append(tree_preds_set.std(axis=0).flatten())
+            
+            tree_preds_entity = np.array([tree.predict(last_features) for tree in model_entity.estimators_])
+            pred_entity = np.clip(tree_preds_entity.mean(axis=0), entity_min, entity_max).flatten()
+            entity_forecasts.append(np.round(pred_entity).astype(int))
+            entity_uncertainties.append(tree_preds_entity.std(axis=0).flatten())
+            
+            next_full_pred = np.concatenate([np.round(pred_set), np.round(pred_entity)])
+            forecast_history = pd.concat([forecast_history, pd.DataFrame([next_full_pred], columns=_df_full.columns, index=[forecast_history.index[-1] + pd.Timedelta(days=1)])])
+
+        index = pd.date_range(start=_df_full.index[-1] + pd.Timedelta(days=1), periods=forecast_horizon)
+        results['set_forecast_df'] = pd.DataFrame(set_forecasts, columns=df_set.columns, index=index)
+        results['entity_forecast_df'] = pd.DataFrame(entity_forecasts, columns=df_entity.columns, index=index)
+        results['set_uncertainty_df'] = pd.DataFrame(set_uncertainties, columns=df_set.columns, index=index)
+        results['entity_uncertainty_df'] = pd.DataFrame(entity_uncertainties, columns=df_entity.columns, index=index)
+
+    else: # Unified Mode
         all_min = list(_min_ranges.values()); all_max = list(_max_ranges.values())
-        results['unified'] = perform_validation_and_forecast(_df_full, _df_full, all_min, all_max)
+        results['unified_metrics'] = _perform_validation(_df_full, _df_full, training_size)
+        features = create_features_for_model(history).drop(columns=_df_full.columns)
+        model = RandomForestRegressor(n_estimators=100, random_state=42).fit(features, history)
+        
+        forecasts, uncertainties = [], []
+        forecast_history = history.copy()
+        for _ in range(forecast_horizon):
+            last_features = create_features_for_model(forecast_history).iloc[-1:].drop(columns=_df_full.columns)
+            tree_preds = np.array([tree.predict(last_features) for tree in model.estimators_])
+            pred = np.clip(tree_preds.mean(axis=0), all_min, all_max).flatten()
+            forecasts.append(np.round(pred).astype(int))
+            uncertainties.append(tree_preds.std(axis=0).flatten())
+            forecast_history = pd.concat([forecast_history, pd.DataFrame([np.round(pred)], columns=_df_full.columns, index=[forecast_history.index[-1] + pd.Timedelta(days=1)])])
+            
+        index = pd.date_range(start=_df_full.index[-1] + pd.Timedelta(days=1), periods=forecast_horizon)
+        results['unified_forecast_df'] = pd.DataFrame(forecasts, columns=_df_full.columns, index=index)
+        results['unified_uncertainty_df'] = pd.DataFrame(uncertainties, columns=_df_full.columns, index=index)
+        
     return results
 
 # ==============================================================================
@@ -150,7 +181,6 @@ st.markdown("An intelligent analysis engine that ingests numerical time-series d
 with st.sidebar:
     st.header("⚙️ System State-Space")
     data_loaded = 'data_full' in st.session_state and st.session_state.data_full is not None
-    
     if not data_loaded: st.info("Upload data to automatically detect and configure column ranges.")
     else: st.success("Ranges Detected & Configurable")
     
@@ -182,8 +212,7 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.get('pro
     try:
         df = pd.read_csv(uploaded_file, header=None, dtype=float)
         st.session_state.processed_file_name = uploaded_file.name
-        num_cols = df.shape[1]
-        st.session_state.num_columns = num_cols; st.session_state.is_bifurcated = num_cols >= 6
+        num_cols = df.shape[1]; st.session_state.num_columns = num_cols; st.session_state.is_bifurcated = num_cols >= 6
         st.session_state.column_names = [f'd{i+1}' for i in range(num_cols)]
         df.columns = st.session_state.column_names
         st.session_state.detected_min_ranges = {col: df[col].min() for col in df.columns}
@@ -192,7 +221,8 @@ if uploaded_file is not None and uploaded_file.name != st.session_state.get('pro
         st.session_state.data_full = df
         st.success(f"File interpreted. Detected {num_cols}-D system. Sidebar ranges auto-configured.")
         if 'analysis_run' in st.session_state: del st.session_state.analysis_run
-    except Exception as e: st.error(f"Error processing file: {e}"); st.session_state.clear(); st.session_state.processed_file_name = uploaded_file.name
+    except Exception as e: 
+        st.error(f"Error processing file: {e}"); st.session_state.clear(); st.session_state.processed_file_name = uploaded_file.name
 
 # --- Analysis Execution & Display ---
 if run_button and data_loaded:
@@ -207,12 +237,12 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
     pred_res = st.session_state.predictive_results
     with st.container(border=True):
         if st.session_state.is_bifurcated:
-            next_set, next_entity = pred_res['set']['forecast_df'].iloc[0], pred_res['entity']['forecast_df'].iloc[0]
+            next_set, next_entity = pred_res['set_forecast_df'].iloc[0], pred_res['entity_forecast_df'].iloc[0]
             cols = st.columns(6); 
             for i in range(5): cols[i].metric(f"{next_set.index[i]} (Set)", int(next_set.values[i]))
             cols[5].metric(f"{next_entity.index[0]} (Entity)", int(next_entity.values[0]))
         else:
-            next_unified = pred_res['unified']['forecast_df'].iloc[0]
+            next_unified = pred_res['unified_forecast_df'].iloc[0]
             cols = st.columns(st.session_state.num_columns)
             for i in range(st.session_state.num_columns): cols[i].metric(f"{next_unified.index[i]}", int(next_unified.values[i]))
     
@@ -247,16 +277,16 @@ if 'analysis_run' in st.session_state and st.session_state.analysis_run:
         if st.session_state.is_bifurcated:
             st.subheader("Bifurcated System Performance")
             m1, m2, m3 = st.columns(3)
-            m1.metric("Set (d1-d5) OOS Loss", f"{pred_res['set']['metrics']['oos_loss']:.3f}", help="Avg. prediction error on unseen data.")
-            m2.metric("Entity (d6) OOS Loss", f"{pred_res['entity']['metrics']['oos_loss']:.3f}", help="Avg. prediction error on unseen data.")
-            m3.metric("Entity Top-3 Accuracy", f"{pred_res['entity']['metrics']['top_n_accuracy']:.2%}" if pred_res['entity']['metrics']['top_n_accuracy'] is not None else "N/A")
-            display_forecast_plot("Forecast for 5-Entity Set (with 95% Confidence)", st.session_state.data_full.iloc[:, :5].tail(training_size), pred_res['set']['forecast_df'], pred_res['set']['uncertainty_df'])
+            m1.metric("Set (d1-d5) OOS Loss", f"{pred_res['set_metrics']['oos_loss']:.3f}")
+            m2.metric("Entity (d6) OOS Loss", f"{pred_res['entity_metrics']['oos_loss']:.3f}")
+            m3.metric("Entity Top-3 Accuracy", f"{pred_res['entity_metrics']['top_n_accuracy']:.2%}" if pred_res['entity_metrics']['top_n_accuracy'] is not None else "N/A")
+            display_forecast_plot("Forecast for 5-Entity Set (with 95% Confidence)", st.session_state.data_full.iloc[:, :5].tail(training_size), pred_res['set_forecast_df'], pred_res['set_uncertainty_df'])
         else:
             st.subheader("Unified System Performance")
             m1, m2 = st.columns(2)
-            m1.metric("Unified System OOS Loss", f"{pred_res['unified']['metrics']['oos_loss']:.3f}")
-            m2.metric("Forecast Stability", f"{pred_res['unified']['metrics']['forecast_stability']:.3f}")
-            display_forecast_plot(f"Forecast for {st.session_state.num_columns}-D Unified System", st.session_state.data_full.tail(training_size), pred_res['unified']['forecast_df'], pred_res['unified']['uncertainty_df'])
+            m1.metric("Unified System OOS Loss", f"{pred_res['unified_metrics']['oos_loss']:.3f}")
+            m2.metric("Forecast Stability", f"{pred_res['unified_metrics']['forecast_stability']:.3f}")
+            display_forecast_plot(f"Forecast for {st.session_state.num_columns}-D Unified System", st.session_state.data_full.tail(training_size), pred_res['unified_forecast_df'], pred_res['unified_uncertainty_df'])
 
     with st.expander("MODULE 3 — System Dynamics & Regime Discovery", expanded=True):
         clustering_df = st.session_state.get('clustering_df')
