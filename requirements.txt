@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+scikit-learn
+scipy
+PyWavelets
+pyts
+umap-learn
+hdbscan
